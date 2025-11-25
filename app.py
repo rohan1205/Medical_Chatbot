@@ -1,164 +1,142 @@
-import nltk
-nltk.download('popular')
-nltk.download('punkt_tab')
-from nltk.stem import WordNetLemmatizer
-lemmatizer = WordNetLemmatizer()
-import pickle
-import numpy as np
-from keras.models import load_model
-model = load_model('model.h5')
+import os
 import json
 import random
+import requests
+from flask import Flask, request, jsonify, render_template
+from langdetect import detect, DetectorFactory
 
+# make language detection deterministic
+DetectorFactory.seed = 0
 
+HF_API_KEY = os.environ.get("HF_API_KEY")
+if not HF_API_KEY:
+    raise RuntimeError("Please set HF_API_KEY env var with your HuggingFace token")
 
+HF_API_URL = "https://api-inference.huggingface.co/models/{}"
+HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"}
 
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
-import spacy
-from spacy.language import Language
-from spacy_langdetect import LanguageDetector
+# models we'll call on the HF Inference API
+# these are remote model names; using the same as your original code where possible
+ENG_SWA_MODEL = "Rogendo/en-sw"   # English -> Swahili
+SWA_ENG_MODEL = "Rogendo/sw-en"   # Swahili -> English
+ZERO_SHOT_MODEL = "facebook/bart-large-mnli"  # zero-shot classification
 
+# load intents
+with open("intents.json", "r", encoding="utf-8") as f:
+    intents = json.load(f)
 
-# translator pipeline for english to swahili translations
+# candidate labels (tags) for zero-shot classification
+CANDIDATE_LABELS = [it["tag"] for it in intents.get("intents", [])]
 
-eng_swa_tokenizer = AutoTokenizer.from_pretrained("Rogendo/en-sw")
-eng_swa_model = AutoModelForSeq2SeqLM.from_pretrained("Rogendo/en-sw")
-
-eng_swa_translator = pipeline(
-    "text2text-generation",
-    model = eng_swa_model,
-    tokenizer = eng_swa_tokenizer,
-)
-
-def translate_text_eng_swa(text):
-    translated_text = eng_swa_translator(text, max_length=128, num_beams=5)[0]['generated_text']
-    return translated_text
-
-
-# translator pipeline for swahili to english translations
-
-swa_eng_tokenizer = AutoTokenizer.from_pretrained("Rogendo/sw-en")
-swa_eng_model = AutoModelForSeq2SeqLM.from_pretrained("Rogendo/sw-en")
-
-swa_eng_translator = pipeline(
-    "text2text-generation",
-    model = swa_eng_model,
-    tokenizer = swa_eng_tokenizer,
-)
-
-def translate_text_swa_eng(text):
-  translated_text = swa_eng_translator(text,max_length=128, num_beams=5)[0]['generated_text']
-  return translated_text
-
-
-def get_lang_detector(nlp, name):
-    return LanguageDetector()
-
-nlp = spacy.load("en_core_web_sm")
-
-Language.factory("language_detector", func=get_lang_detector)
-
-nlp.add_pipe('language_detector', last=True)
-
-
-
-
-
-intents = json.loads(open('intents.json').read())
-words = pickle.load(open('texts.pkl','rb'))
-classes = pickle.load(open('labels.pkl','rb'))
-def clean_up_sentence(sentence):
-    sentence_words = nltk.word_tokenize(sentence)
-    sentence_words = [lemmatizer.lemmatize(word.lower()) for word in sentence_words]
-    return sentence_words
-
-def bow(sentence, words, show_details=True):
-    sentence_words = clean_up_sentence(sentence)
-    bag = [0]*len(words)  
-    for s in sentence_words:
-        for i,w in enumerate(words):
-            if w == s: 
-                bag[i] = 1
-                if show_details:
-                    print ("found in bag: %s" % w)
-    return(np.array(bag))
-
-def predict_class(sentence, model):
-    p = bow(sentence, words,show_details=False)
-    res = model.predict(np.array([p]))[0]
-    ERROR_THRESHOLD = 0.25
-    results = [[i,r] for i,r in enumerate(res) if r>ERROR_THRESHOLD]
-    results.sort(key=lambda x: x[1], reverse=True)
-    return_list = []
-    for r in results:
-        return_list.append({"intent": classes[r[0]], "probability": str(r[1])})
-    return return_list
-def getResponse(ints, intents_json):
-    if ints: 
-        tag = ints[0]['intent']
-        list_of_intents = intents_json['intents']
-        for i in list_of_intents:
-            if i['tag'] == tag:
-                result = random.choice(i['responses'])
-                break
-        return result
-    else:
-        return "Sorry, I didn't understand that."
-
-def chatbot_response(msg):
-    doc = nlp(msg)
-    detected_language = doc._.language['language']
-    print(f"Detected language chatbot_response:- {detected_language}")
-    
-    chatbotResponse = "Loading bot response..........."
-
-    if detected_language == "en":
-        res = getResponse(predict_class(msg, model), intents)
-        chatbotResponse = res
-        print("en_sw chatbot_response:- ", res)
-    elif detected_language == 'sw':
-        translated_msg = translate_text_swa_eng(msg)
-        res = getResponse(predict_class(translated_msg, model), intents)
-        chatbotResponse = translate_text_eng_swa(res)
-        print("sw_en chatbot_response:- ", chatbotResponse)
-
-    return chatbotResponse
-
-    
-from flask import Flask, render_template, request
 app = Flask(__name__)
-app.static_folder = 'static'
+app.static_folder = "static"
+
+def hf_post(model_name, payload):
+    """Helper to POST to HF inference API and return JSON (or raise)."""
+    url = HF_API_URL.format(model_name)
+    r = requests.post(url, headers=HEADERS, json=payload, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+def translate_text(model_name, text, max_length=128):
+    """Translate text by calling a text2text-generation model on HuggingFace."""
+    payload = {"inputs": text, "parameters": {"max_length": max_length, "num_beams": 5}}
+    out = hf_post(model_name, payload)
+    # HF returns different shapes sometimes; handle common ones
+    if isinstance(out, dict) and out.get("error"):
+        raise RuntimeError(f"HF error: {out['error']}")
+    # out is usually a list of dicts: [{'generated_text': '...'}]
+    if isinstance(out, list) and len(out) > 0 and "generated_text" in out[0]:
+        return out[0]["generated_text"]
+    # some translation models may return text directly
+    if isinstance(out, str):
+        return out
+    # fallback
+    return str(out)
+
+def classify_zero_shot(text, candidate_labels=CANDIDATE_LABELS):
+    """Zero-shot classification via HF inference API. Returns top label and score."""
+    payload = {"inputs": text, "parameters": {"candidate_labels": candidate_labels}}
+    out = hf_post(ZERO_SHOT_MODEL, payload)
+    # expected shape: {"labels": [...], "scores": [...]}
+    labels = out.get("labels", [])
+    scores = out.get("scores", [])
+    if labels and scores:
+        return labels[0], float(scores[0])
+    # fallback: return first label
+    return candidate_labels[0], 0.0
+
+def get_response_for_tag(tag):
+    """Return a random response text for an intent tag."""
+    for it in intents.get("intents", []):
+        if it.get("tag") == tag:
+            responses = it.get("responses", [])
+            if responses:
+                return random.choice(responses)
+    return "Sorry, I didn't understand that."
+
 @app.route("/")
 def home():
-    return render_template("index.html")
+    # If you have index.html in templates, render; otherwise a small message
+    try:
+        return render_template("index.html")
+    except Exception:
+        return "Vercel Flask server is running. Use /get?msg=your_message"
+
 @app.route("/get")
 def get_bot_response():
-    userText = request.args.get('msg')
-    print("get_bot_response:- " + userText)
+    userText = request.args.get("msg", "").strip()
+    if not userText:
+        return "Please provide ?msg=..."
 
-    doc = nlp(userText)
-    detected_language = doc._.language['language']
-    print(f"Detected language get_bot_response:- {detected_language}")
+    # 1) detect language locally
+    try:
+        detected_language = detect(userText)
+    except Exception:
+        detected_language = "en"  # fallback
 
-    bot_response_translate = "Loading bot response..........."  
+    # normalize language codes (langdetect uses ISO-639-1: 'en', 'sw', etc.)
+    # We expect 'sw' for Swahili
+    is_swahili = detected_language == "sw"
 
-    if detected_language == "en":
-        bot_response_translate = userText  
-        print("en_sw get_bot_response:-", bot_response_translate)
-        
-    elif detected_language == 'sw':
-        bot_response_translate = translate_text_swa_eng(userText)  
-        print("sw_en get_bot_response:-", bot_response_translate)
+    # 2) if swahili -> translate to english using HF
+    if is_swahili:
+        try:
+            text_for_classification = translate_text(SWA_ENG_MODEL, userText)
+        except Exception as e:
+            # if translation fails, fallback to original text
+            print("Translation SW->EN failed:", e)
+            text_for_classification = userText
+    else:
+        text_for_classification = userText
 
-    chatbot_response_text = chatbot_response(bot_response_translate)
+    # 3) classify using zero-shot (using intent tags as candidate labels)
+    try:
+        predicted_tag, score = classify_zero_shot(text_for_classification)
+    except Exception as e:
+        print("Classification failed:", e)
+        # fallback: no intent matched
+        predicted_tag, score = None, 0.0
 
-    if detected_language == 'sw':
-        chatbot_response_text = translate_text_eng_swa(chatbot_response_text)
+    # 4) pick a response from intents.json
+    if predicted_tag:
+        bot_response_en = get_response_for_tag(predicted_tag)
+    else:
+        bot_response_en = "Sorry, I didn't understand that."
 
-    return chatbot_response_text
+    # 5) if user originally used swahili, translate back
+    if is_swahili:
+        try:
+            bot_response = translate_text(ENG_SWA_MODEL, bot_response_en)
+        except Exception as e:
+            print("Translation EN->SW failed:", e)
+            bot_response = bot_response_en
+    else:
+        bot_response = bot_response_en
 
-
-
+    return bot_response
 
 if __name__ == "__main__":
-    app.run()
+    # port and host for local testing
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
