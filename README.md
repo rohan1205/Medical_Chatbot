@@ -1,4 +1,3 @@
-<p><h3 align="center"><img src="https://img.shields.io/badge/Mental-Health-blue" alt="shields"><img src="https://img.shields.io/github/stars/Rogendo/Mental-health-Chatbot%20" alt="shields"><img src="https://img.shields.io/github/forks/Rogendo/Mental-health-Chatbot" alt="shields"><img src="https://img.shields.io/github/contributors/Rogendo/Mental-health-Chatbot" alt="shields"></h3></p>
 
 
 <p align="center"><img src="https://socialify.git.ci/Rogendo/Mental-health-Chatbot/image?language=1&amp;owner=1&amp;name=1&amp;stargazers=1&amp;theme=Light" alt="project-image"></p>
