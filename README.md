@@ -22,7 +22,7 @@ The following instructions were tested on the Windows and Linux with Python 3.8.
 1. Clone this repository
 
 ```
-git clone https://github.com/Rogendo/Mental-health-Chatbot.git
+git clone https://github.com/rohan1205/Mental-health-Chatbot.git
 ```
 ```
 cd Mental-health-Chatbot/
@@ -52,6 +52,7 @@ pip install  -r requirements.txt
 flask --app app --debug run
 
 ```
+
 
 
 
